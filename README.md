@@ -3,10 +3,10 @@
 Combines the good parts of `SharePoint-submittal-agent` and
 `Claude-Web-Agent` into one workflow, matched to the real submittal
 process: a shop drawing gets submitted, Jacobs/the designer responds and
-uploads their response to that revision's SharePoint item (submittals
-often go through several revisions, e.g. `134-R0`, `134-R1`, `134-R3`),
-and this agent's job is to notice that, save the response, update the log,
-and tell the team — never to touch the portal itself.
+uploads their response to that revision's SharePoint item (submittals go
+through several revisions), and this agent's job is to notice that, save
+the response, update the log, and tell the team — never to touch the
+portal itself.
 
 ```
 [Chrome, running long-term, logged into the Jacobs SharePoint site]
@@ -20,71 +20,96 @@ and tell the team — never to touch the portal itself.
                  |
                  v
       log_writer.py (unchanged from SharePoint-submittal-agent)
-      -- diffs against the Dropbox "Shop Drawing Log", updates only the
+      -- diffs against the Shop Drawing Log workbook, updates only the
       sync-owned columns, leaves manual columns alone
                  |
                  v
       attachments.py -- downloads the Jacobs/designer response file for
-      each revision (filename matching "SRC"), uploads to
-      /EWD Contract 2/Engineer Responses/<TUL#>/, skips duplicates.
-      Revision is already encoded in TUL#, so R1/R2/R3 responses each
-      land in their own subfolder — nothing gets overwritten.
+      each revision (filename matching "SRC"), saves into the matching
+      local "Submittal 0XX - .../Revision 0X" folder, skips duplicates
                  |
                  v
-      dropbox_client.py -- writes the updated workbook + response files
+      local_dropbox_client.py -- plain filesystem reads/writes through
+      wherever the Dropbox desktop client has mounted "Technicore
+      Dropbox" on this machine. NOT the Dropbox API.
                  |
                  v
       notify.py -- emails the team: new items, status changes, a status
-      breakdown, and links to newly saved response files
+      breakdown, and paths to newly saved response files
 ```
+
+## Why local filesystem instead of the Dropbox API
+
+Your screenshots showed the actual setup: "Technicore Dropbox" is mounted
+as an ordinary folder via the Dropbox desktop client (visible in File
+Explorer's sidebar, with cloud-sync status icons). That means there's
+nothing to build against an API for — the agent just reads and writes
+files at that path like any other program on the machine, and the
+already-running Dropbox client handles syncing them in the background.
+
+This sidesteps the whole earlier Dropbox-app-permission question: there's
+no app to register, so there's nothing for a Business/Team admin to
+approve or block. The only requirement is that the machine running this
+has the Dropbox desktop client installed, signed into the Technicore
+Dropbox team space, and running — true by default on your machine already,
+and easy to ensure on whatever machine ends up running this on a schedule.
+
+## The real folder structure (confirmed from live screenshots)
+
+```
+Technicore Dropbox\
+  12106 East to West DSTT\                          <- project folder
+    18_Submittals and Shop Drawings\
+      Submittal 012 - Air Quality Monitoring Plan\   <- matched by Item No.
+        Revision 00\
+          01561-01-R0 - Air Quality Monitoring Plan.pdf       (originally submitted)
+          01561-01-R0-Air Quality Monitoring Plan-SRC.docx    (Jacobs response)
+          01561-01-R0-Air Quality Monitoring Plan-SRC.pdf     (Jacobs response)
+        Revision 01\
+          ...
+```
+
+`local_dropbox_client.find_submittal_folder()` matches on Item No. (e.g.
+`01` → a folder starting with `Submittal 001`) rather than trying to
+reconstruct the full folder name, since the description text after the
+number is free-form and not worth guessing exactly. The revision folder
+is found (or created, since this is our own storage — not the portal) from
+the revision number parsed out of the `SUB No.` field, e.g. `01561-01-R0`
+→ revision `0` → `Revision 00`.
 
 ## 1. Navigation — explicit, not assumed
 
-Earlier version of this just checked that *some* open tab's URL contained
-a substring and called the REST API directly. That's not good enough to
-hand off — if the tab happened to be sitting on a stale page, or the
-session had quietly expired, it would look like "0 submittals" instead of
-failing clearly. `sharepoint_tab_client.py` now follows a stated contract:
+`sharepoint_tab_client.py` follows a stated contract rather than assuming
+whatever tab happens to be open has current data:
 
 1. Find an open tab whose URL contains `SP_TAB_URL_SUBSTRING` (proves we
    have a live browser context to borrow cookies from).
 2. **Explicitly navigate** that tab to
-   `{SP_SITE_URL}/Lists/{SP_LIST_NAME}/AllItems.aspx` and wait for the
-   page to settle.
+   `{SP_SITE_URL}/Lists/{SP_LIST_URL_PATH}/AllItems.aspx` and wait for the
+   page to settle. Note this uses the URL slug (`EWD C2 Submittals`), not
+   the list's display name (`Submittals`) — confirmed these differ on this
+   site from a live screenshot.
 3. Check the resulting URL for a Microsoft login redirect. If found, the
    session has expired — the agent **raises immediately** with a clear
    "log back into the tab" message instead of silently proceeding.
 4. Only then does it call the REST endpoint the list view itself just
    loaded from (`_api/web/lists/GetByTitle(...)`), using that same
-   session.
+   session, with pagination.
 
-This is all in `SharePointTabClient._navigate_to_list()` — read it before
-pointing this at the live portal, and adjust `AllItems.aspx` if your
-Jacobs site uses a custom view URL instead of the default.
-
-## 2. Read-only, by construction
+## 2. Read-only on SharePoint, by construction
 
 There is no method anywhere in this project that creates, updates,
 deletes, or comments on anything in SharePoint — only `GET` requests
 through `_rest_get()` and `download_attachment()`. The agent's entire
-write surface is: the Dropbox log file, the Dropbox response-file
-subfolder, and the notification email. That's stated explicitly in
-`sharepoint_tab_client.py`'s module docstring as a constraint for anyone
-extending it later, not just as a design note.
+write surface is: the local Shop Drawing Log file, the local response-file
+folders, and the notification email.
 
-## 3. Response files — the `SRC` pattern and revisions
+## 3. Response files — the `SRC` pattern
 
 `SP_RESPONSE_FILE_PATTERN` (default `SRC`) identifies which attachment on
-a submittal item is the actual Jacobs/designer response, as opposed to the
-originally submitted shop drawing or a transmittal cover sheet sitting on
-the same item. Only files matching that pattern get downloaded.
-
-Because the SharePoint list `Title` field encodes the revision (e.g.
-`TUI Submittal 134.R3`), and that's exactly what's used as both the log's
-match key and the Dropbox subfolder name, each revision's response lands
-at its own path — `/EWD Contract 2/Engineer Responses/134.R3/...` — so a
-new revision's response never overwrites an earlier one's, and the log's
-revision history stays intact.
+a submittal item is the Jacobs/designer response, as opposed to the
+originally submitted shop drawing sitting on the same item — confirmed
+from a live item's attachments (see folder structure above).
 
 ## Setup
 
@@ -114,96 +139,138 @@ python list_fields.py
 Compare the printed internal names against what `sharepoint_tab_client.py`
 assumes (`Title`, `Status`, `SUBNo`, `StartDate`, `Disposition`, `ItemNo`).
 
-### 3. Dropbox app (same as SharePoint-submittal-agent)
+### 3. Find your local Dropbox paths
 
-Reuse the same `DBX_APP_KEY` / `DBX_APP_SECRET` / `DBX_REFRESH_TOKEN` if
-you already set one up — **but check its access type first**:
+No app or credentials needed — just real filesystem paths. In File
+Explorer, navigate to the relevant folders, then Shift+right-click →
+**Copy as path** (or right-click → Properties → Location, on some
+Windows versions) to get the exact path string:
 
-1. **dropbox.com/developers/apps** → your app → confirm it's **Scoped
-   access / Full Dropbox**, not **App folder**. App folder sandboxes the
-   app to its own isolated `/Apps/<AppName>/` directory and can't reach
-   your existing Shop Drawing Log wherever it actually lives. If the
-   existing app was created as App folder, create a new one as Full
-   Dropbox — access type can't be changed after creation.
-2. **Permissions** tab → enable `files.content.read`, `files.content.write`,
-   and `files.metadata.read` (the last one is needed for the duplicate
-   check before uploading a response file).
-3. Generate a refresh token the same way as before (see the original
-   repo's README) and set `DBX_APP_KEY` / `DBX_APP_SECRET` /
-   `DBX_REFRESH_TOKEN`.
+- `DROPBOX_ROOT_PATH` — the "Technicore Dropbox" folder itself, e.g.
+  `C:\Users\Amr\Technicore Dropbox`
+- `DBX_LOG_PATH` — full path to the Shop Drawing Log workbook
+- `DBX_SUBMITTALS_ROOT` — the `18_Submittals and Shop Drawings` folder for
+  this project, e.g.
+  `C:\Users\Amr\Technicore Dropbox\12106 East to West DSTT\18_Submittals and Shop Drawings`
 
-### 4. Find the exact Dropbox paths
-
-Don't guess at spacing/casing by eye — Dropbox paths need to match
-exactly. Once the app credentials above are set:
-
-```bash
-python list_dropbox_paths.py                    # your Dropbox root
-python list_dropbox_paths.py "/EWD Contract 2"   # inside a folder
-```
-
-This prints the exact `path_display` for everything at that level. Copy
-the log file's path into `DBX_LOG_PATH`. For `DBX_RESPONSES_FOLDER`, pick
-any path you want (existing or new) — you don't need to pre-create it,
-`files_upload` creates any missing parent folders automatically on first
-upload.
-
-### 5. Environment variables
+### 4. Environment variables
 
 ```
 CDP_URL=http://localhost:9222
 SP_TAB_URL_SUBSTRING=EWDC2
 SP_SITE_URL=https://jacobsengineering.sharepoint.com/sites/CP703215CH/EWDC2
 SP_LIST_NAME=Submittals
+SP_LIST_URL_PATH=EWD C2 Submittals
 SP_RESPONSE_FILE_PATTERN=SRC
 
-DBX_APP_KEY=...
-DBX_APP_SECRET=...
-DBX_REFRESH_TOKEN=...
-DBX_LOG_PATH=/EWD Contract 2/Shop Drawing Log.xlsx
+DROPBOX_ROOT_PATH=C:\Users\Amr\Technicore Dropbox
+DBX_LOG_PATH=C:\Users\Amr\Technicore Dropbox\12106 East to West DSTT\...\Shop Drawing Log.xlsx
 DBX_SHEET_NAME=Ongoing & Submitted
-DBX_RESPONSES_FOLDER=/EWD Contract 2/Engineer Responses
-DBX_SHARED_LINK_BASE=          # optional
+DBX_SUBMITTALS_ROOT=C:\Users\Amr\Technicore Dropbox\12106 East to West DSTT\18_Submittals and Shop Drawings
 
 GMAIL_ADDRESS=...
 GMAIL_APP_PASSWORD=...
 NOTIFY_TO=...
 ```
 
-### 6. Dry run, then real run
+### 5. Dry run, then real run
 
 ```bash
 DRY_RUN=1 python main.py   # prints the diff, downloads/writes/emails nothing
 python main.py              # real run
 ```
 
+## Running it: two ways
+
+### Push to GitHub
+
+Already done on your end. Worth noting: **GitHub is for storing the code,
+not running it.** GitHub Actions runners are ephemeral and headless — they
+can't attach to your already-logged-in Chrome tab or see your Dropbox
+folder. This has to actually execute on a machine that has both of those
+live, which for now means your own machine (or a VM you set up the same
+way) rather than a CI runner.
+
+### Scheduled nightly run (Windows Task Scheduler)
+
+1. Make sure Chrome (with `--remote-debugging-port=9222`, logged into
+   SharePoint) and the Dropbox desktop client are both left running on
+   whatever machine will execute this.
+2. Write a small wrapper batch file, e.g. `run_agent.bat`:
+   ```bat
+   cd /d C:\path\to\submittal-notification-agent
+   call venv\Scripts\activate.bat
+   python main.py >> logs\run.log 2>&1
+   ```
+3. Open **Task Scheduler → Create Task**:
+   - **General**: run whether user is logged on or not (if the machine
+     stays logged in, "Run only when user is logged on" is simpler and
+     avoids Chrome-session complications).
+   - **Triggers**: New → Daily → your chosen time (e.g. 6:00 AM, before
+     the team's day starts).
+   - **Actions**: New → Start a program → point at `run_agent.bat`.
+   - **Conditions**: uncheck "Start the task only if the computer is on
+     AC power" if this is a laptop; check "Wake the computer to run this
+     task" if it might be asleep.
+4. Test it once with **Run** in Task Scheduler before trusting the nightly
+   trigger, and check `logs\run.log` afterward.
+
+## How to watch it run / confirm it worked
+
+**Running it yourself, live:** just run `python main.py` in a normal
+terminal window with Chrome visible on screen. You'll see two things
+happening in parallel: timestamped status lines printing in the terminal
+(`Attaching to open Chrome tab...`, `Navigated OK...`, `Pulled N
+submittal(s)...`, etc.), and the actual Chrome tab visibly jumping to the
+SharePoint list view when `_navigate_to_list()` runs — it's not headless,
+so you can watch it navigate in real time. This is the easiest way to
+sanity-check a first run or a config change before trusting it unattended.
+
+**Checking on a scheduled overnight run,** in order of how much detail
+each gives you:
+
+1. **Did the notification email arrive?** The fastest signal — if the
+   team got the summary email, the whole pipeline completed successfully.
+   No email doesn't necessarily mean failure though (it's also silent
+   when there are no changes to report — see `main.py`'s early return).
+2. **Task Scheduler → your task → History tab** (or the **Last Run
+   Result** column on the main Task Scheduler list). `0x0` means it exited
+   cleanly; anything else means `main.py` raised and you should check the
+   log.
+3. **`logs\run.log`** — every run appends a `===== Run started =====` /
+   `===== Run finished =====` block with a timestamp on every line, so
+   you can see exactly what happened and how long each step took, even
+   days later. This is where you'll see the specific error if the
+   SharePoint session had expired overnight, or a warning that a
+   submittal's local folder couldn't be matched.
+
+Worth running it on the actual nightly schedule (not just manually) for
+the first few nights and checking `run.log` each morning, before trusting
+it to run unattended for good — that's really the only way to learn how
+long your SharePoint session survives overnight unattended.
+
 ## Known gaps to sanity-check before trusting this on the live log
 
-- **`AllItems.aspx` URL assumption**: step 2 of the navigation contract
-  assumes the default modern-list view URL pattern. If Jacobs' site uses
-  a custom view, adjust `_navigate_to_list()` accordingly — `list_fields.py`
-  won't catch this since it calls REST directly without navigating first.
+- **`AllItems.aspx` URL assumption**: navigation assumes the default
+  modern-list view URL pattern. If Jacobs' site uses a custom view, adjust
+  `_navigate_to_list()` in `sharepoint_tab_client.py`.
 - **Session lifetime**: if the SharePoint session expires between runs,
-  the agent now fails clearly (rather than silently) — but it still needs
-  a human to re-log-in the tab. Not self-healing like a service principal.
-- **`SRC` pattern**: confirm this matches your actual response filenames
-  before the first real run — `python list_fields.py` shows attachment
-  data too if you want to check filenames on a live item first.
-- **"Date responded by Jacobs" could now be automated**: `SharePoint-submittal-agent`'s
-  README originally left this log column as manual-only, reasoning that
-  "SharePoint has no actual responded date, only a Target/due date." A live
-  item screenshot shows that's not quite right — there's a `Returned to
-  Contractor Date` field on each item that looks like exactly this. Not
-  wired in yet since changing what's synced vs. manual is a real behavior
-  change worth confirming first — if you want it added to `SYNCED_FIELDS`,
-  say the word and I'll map it in.
-- **Whole-file overwrite**: each run re-uploads the entire log workbook.
-  Not safe if someone's editing it in Dropbox at the exact moment a run
-  fires.
-- **Scheduling**: needs a live local Chrome instance, so this can't run on
-  GitHub Actions like the Graph version — needs a machine (or persistent
-  VM) where that Chrome + logged-in tab lives, via cron / Task Scheduler.
+  the agent fails clearly (not silently) but still needs a human to
+  re-log-in the tab. For a nightly unattended run, this is the main risk
+  — worth checking the session is still valid each morning until you've
+  seen how long it holds.
+- **Multiple/zero folder matches**: if `find_submittal_folder()` finds
+  more than one folder starting with `Submittal 0XX` (or none), it warns
+  and skips that submittal's response rather than guessing — check
+  `logs\run.log` for these warnings periodically.
+- **"Date responded by Jacobs" could now be automated**: there's a
+  `Returned to Contractor Date` field on each SharePoint item that looks
+  like a real source for this previously-manual log column. Not wired in
+  yet — say the word and I'll map it into `SYNCED_FIELDS`.
+- **Whole-file overwrite**: each run rewrites the entire log workbook.
+  Not safe if someone has it open and is editing at the exact moment a
+  scheduled run fires.
 - **Generalizing to RFIs**: this same shape (navigate → read-only REST
   pull → log diff/update → response-file sync → status-breakdown email)
-  should carry over to an RFI log with a different list name, column
-  mapping, and Dropbox path once this is validated on submittals.
+  should carry over to an RFI log with a different list name and folder
+  structure once this is validated on submittals.

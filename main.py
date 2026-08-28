@@ -12,15 +12,22 @@ agent's only job is to notice that, save it, and tell people:
      rather than silently reading nothing.
   2. Pull normalized submittal data via SharePoint REST, through that
      session (no DOM scraping, no Graph API, no Azure app registration).
-     READ ONLY — this step and step 4 never write anything back to
-     SharePoint; nothing in this project does.
-  3. Diff against the current Dropbox "Shop Drawing Log" and update only
-     the sync-owned columns (log_writer.py, reused unchanged).
+     READ ONLY — nothing in this project writes back to SharePoint.
+  3. Diff against the Shop Drawing Log workbook (a plain local file — see
+     local_dropbox_client.py) and update only the sync-owned columns
+     (log_writer.py, reused unchanged).
   4. Download each revision's Jacobs/designer response file (filename
-     matching SP_RESPONSE_FILE_PATTERN, default "SRC") and upload it to a
-     per-revision Dropbox subfolder, skipping ones already saved.
+     matching SP_RESPONSE_FILE_PATTERN, default "SRC") and save it into
+     the matching local "Submittal 0XX - .../Revision 0X" folder, skipping
+     ones already saved. Also a plain local file write — Dropbox's own
+     desktop client handles syncing it, not this code.
   5. Email the team: new items, status changes, a current status
-     breakdown, and links to newly saved response files.
+     breakdown, and paths to newly saved response files.
+
+Every line printed is timestamped (see _log below) so a redirected log
+file from an unattended nightly run is actually readable afterward, not
+just a wall of text with no sense of when anything happened or how long
+each step took.
 
 Run:
     python main.py
@@ -30,16 +37,22 @@ downloads nothing from SharePoint):
 """
 import asyncio
 import sys
+from datetime import datetime
 
 from config import Config
 from sharepoint_tab_client import SharePointTabClient, SharePointTabConfig
-from dropbox_client import DropboxClient
+from local_dropbox_client import LocalDropboxClient
 from log_writer import update_workbook
 from attachments import sync_responses
 from notify import notify_changes
 
 
+def _log(msg: str) -> None:
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
 async def async_main() -> None:
+    _log("===== Run started =====")
     cfg = Config()
 
     sp_cfg = SharePointTabConfig(
@@ -51,55 +64,51 @@ async def async_main() -> None:
         response_file_pattern=cfg.SP_RESPONSE_FILE_PATTERN,
     )
 
-    print(f"Attaching to open Chrome tab at {cfg.CDP_URL}...")
+    dbx = LocalDropboxClient(cfg)
+
+    _log(f"Attaching to open Chrome tab at {cfg.CDP_URL}...")
     async with SharePointTabClient(sp_cfg) as sp:
-        print("Pulling submittals from SharePoint (via open-tab session)...")
+        _log(f"Navigated OK. Pulling submittals from '{cfg.SP_LIST_NAME}' (via open-tab session)...")
         submittals = await sp.get_submittals()
-        print(f"Pulled {len(submittals)} submittal(s) from '{cfg.SP_LIST_NAME}'.")
+        _log(f"Pulled {len(submittals)} submittal(s).")
 
-        dbx = DropboxClient(cfg)
-
-        print(f"Downloading current log: {cfg.DBX_LOG_PATH}")
+        _log(f"Reading current log: {cfg.DBX_LOG_PATH}")
         existing_bytes = dbx.load_workbook_bytes()
 
-        print("Computing changes...")
+        _log("Computing changes...")
         new_bytes, added, changed = update_workbook(cfg, existing_bytes, submittals)
 
-        print("Checking for new Jacobs/designer response files...")
-        uploaded = {} if cfg.DRY_RUN else await sync_responses(
-            sp, dbx, submittals, cfg.DBX_RESPONSES_FOLDER
-        )
-        if uploaded:
-            total = sum(len(v) for v in uploaded.values())
-            print(f"Uploaded {total} new response file(s) across {len(uploaded)} submittal revision(s).")
+        _log("Checking for new Jacobs/designer response files...")
+        saved = {} if cfg.DRY_RUN else await sync_responses(sp, dbx, submittals)
+        if saved:
+            total = sum(len(v) for v in saved.values())
+            _log(f"Saved {total} new response file(s) across {len(saved)} submittal revision(s).")
 
-    if not (added or changed or uploaded):
-        print("No changes detected.")
+    if not (added or changed or saved):
+        _log("No changes detected. ===== Run finished =====")
         return
 
-    print(f"New submittals ({len(added)}): {added}")
-    print(f"Status changes ({len(changed)}): {changed}")
+    _log(f"New submittals ({len(added)}): {added}")
+    _log(f"Status changes ({len(changed)}): {changed}")
 
     if cfg.DRY_RUN:
-        print("\nDRY_RUN=1 set — not writing to Dropbox, not sending email, not downloading response files.")
+        _log("DRY_RUN=1 set — not writing the log, not sending email, not downloading response files.")
+        _log("===== Run finished (dry run) =====")
         return
 
-    print("Uploading updated log to Dropbox...")
+    _log("Writing updated log...")
     dbx.save_workbook_bytes(new_bytes)
 
-    print("Notifying team...")
-    notify_changes(
-        cfg, added, changed, submittals,
-        uploaded_responses=uploaded,
-        dropbox_shared_link_base=cfg.DBX_SHARED_LINK_BASE,
-    )
-    print("Done.")
+    _log("Notifying team...")
+    notify_changes(cfg, added, changed, submittals, saved_responses=saved)
+    _log("===== Run finished =====")
 
 
 def main() -> None:
     try:
         asyncio.run(async_main())
     except Exception as e:
+        _log(f"ERROR: {e}")
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 

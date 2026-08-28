@@ -36,24 +36,20 @@ class Config:
     # on the same item does not.
     SP_RESPONSE_FILE_PATTERN = os.environ.get("SP_RESPONSE_FILE_PATTERN", "SRC")
 
-    # --- Dropbox ---
-    DBX_APP_KEY = _require("DBX_APP_KEY")
-    DBX_APP_SECRET = _require("DBX_APP_SECRET")
-    DBX_REFRESH_TOKEN = _require("DBX_REFRESH_TOKEN")
-
-    DBX_LOG_PATH = _require("DBX_LOG_PATH")  # e.g. "/EWD Contract 2/Shop Drawing Log.xlsx"
+    # --- Dropbox — local filesystem via the Dropbox desktop client, NOT the
+    # API. No app registration, no OAuth, no admin approval: this is just a
+    # normal path on disk that the already-running Dropbox client syncs in
+    # the background, exactly like any other program reading/writing files
+    # there. Confirmed real structure (2026-08-27 screenshots):
+    #   <DROPBOX_ROOT_PATH>\<Project>\18_Submittals and Shop Drawings\
+    #       Submittal 012 - Air Quality Monitoring Plan\Revision 00\...
+    DROPBOX_ROOT_PATH = _require("DROPBOX_ROOT_PATH")  # e.g. r"C:\Users\Amr\Technicore Dropbox"
+    DBX_LOG_PATH = _require("DBX_LOG_PATH")  # full local path to the Shop Drawing Log.xlsx
     DBX_SHEET_NAME = os.environ.get("DBX_SHEET_NAME", "Ongoing & Submitted")
-    # Response files are saved under <this>/<TUL Submittal #>/<filename>.
-    # The TUL Submittal # already encodes the revision (e.g. "134.R3"), so
-    # each revision's response lands in its own subfolder automatically —
-    # earlier revisions' responses are never overwritten by later ones.
-    DBX_RESPONSES_FOLDER = os.environ.get(
-        "DBX_RESPONSES_FOLDER", "/EWD Contract 2/Engineer Responses"
-    )
-    # Optional: if you generate/know a Dropbox shared-link base for this
-    # folder, notification emails will link straight to files instead of
-    # showing bare Dropbox paths.
-    DBX_SHARED_LINK_BASE = os.environ.get("DBX_SHARED_LINK_BASE", "")
+    # Local path to the "18_Submittals and Shop Drawings" folder for this
+    # project — response files are saved into the matching
+    # "Submittal 0XX - .../Revision 0X" subfolder found under here.
+    DBX_SUBMITTALS_ROOT = _require("DBX_SUBMITTALS_ROOT")
 
     # --- Log layout: unchanged from SharePoint-submittal-agent so
     # log_writer.py can be reused verbatim. ---

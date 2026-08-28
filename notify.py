@@ -26,12 +26,11 @@ def notify_changes(
     added: list[str],
     changed: list[str],
     all_submittals: list[dict],
-    uploaded_responses: dict[str, list[str]] | None = None,
-    dropbox_shared_link_base: str = "",
+    saved_responses: dict[str, list[str]] | None = None,
 ) -> None:
     if not (cfg.GMAIL_ADDRESS and cfg.GMAIL_APP_PASSWORD and cfg.NOTIFY_TO):
         return
-    if not added and not changed and not uploaded_responses:
+    if not added and not changed and not saved_responses:
         return
 
     lines = ["Submittal log sync ran — here's the summary:", ""]
@@ -42,13 +41,12 @@ def notify_changes(
     lines.append("")
     lines.extend(_status_breakdown(all_submittals))
 
-    if uploaded_responses:
+    if saved_responses:
         lines.append("")
-        lines.append("New Jacobs/designer response files pulled from SharePoint:")
-        for tul_no, paths in uploaded_responses.items():
+        lines.append("New Jacobs/designer response files saved (path relative to Technicore Dropbox):")
+        for tul_no, paths in saved_responses.items():
             for p in paths:
-                link = f"{dropbox_shared_link_base}{p}" if dropbox_shared_link_base else p
-                lines.append(f"  - [{tul_no}] {link}")
+                lines.append(f"  - [{tul_no}] {p}")
 
     body = "\n".join(lines)
 
